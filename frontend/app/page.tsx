@@ -43,6 +43,7 @@ import {
   Sun,
 } from "lucide-react"
 import { useTheme } from "next-themes"
+import Titlebar from "@/components/ui/titlebar"
 
 interface TranscriptEntry {
   id: string
@@ -86,8 +87,11 @@ declare global {
       processAISummary: (transcript: string) => Promise<{ success: boolean; summary?: string; action_items?: any[]; transcript?: string; error?: string }>;
       exportToNotion: (config: { apiKey: string; databaseId: string; pageTitle?: string; }, data: { summary: string; tasks: Task[]; transcript: string; meetingDuration?: string; participants?: string[] }) => Promise<{ success: boolean; pageId?: string; error?: string }>;
       fetchNotionDatabases: (apiKey: string) => Promise<{ success: boolean; databases?: { id: string; title: string }[]; error?: string }>;
-      onTranscriptUpdate: (callback: (event: Electron.IpcRendererEvent, transcript: TranscriptEntry[]) => void) => void;
-      onMeetingStatusChange: (callback: (event: Electron.IpcRendererEvent, status: string) => void) => void;
+      onTranscriptUpdate: (callback: (event: any, transcript: TranscriptEntry[]) => void) => void;
+      onMeetingStatusChange: (callback: (event: any, status: string) => void) => void;
+      resizeWindow: (width: number, height: number) => void;
+      setAlwaysOnTop: (isTop: boolean) => void;
+      getDesktopSourceId: () => Promise<{ success: boolean; sourceId?: string; error?: string }>;
     }
   }
 }
@@ -117,10 +121,13 @@ export default function MeetingTranscriptApp() {
   })
   const [isExportingToNotion, setIsExportingToNotion] = useState(false)
   const [notionDatabases, setNotionDatabases] = useState<Array<{ id: string; title: string }>>([])
+  const [isWidgetMode, setIsWidgetMode] = useState(true)
 
   // Refs for MediaRecorder
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
+  const socketRef = useRef<WebSocket | null>(null)
+  const fullTranscriptRef = useRef<string>("")
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
   
 
@@ -129,6 +136,19 @@ export default function MeetingTranscriptApp() {
   useEffect(() => {
     setMounted(true)
   }, [])
+
+  // Widget Mode Native Resizing
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.electronAPI?.resizeWindow) {
+      if (isWidgetMode) {
+        window.electronAPI.resizeWindow(350, 80);
+        window.electronAPI.setAlwaysOnTop(true);
+      } else {
+        window.electronAPI.resizeWindow(1200, 800);
+        window.electronAPI.setAlwaysOnTop(false);
+      }
+    }
+  }, [isWidgetMode]);
 
   // Load Notion config from localStorage
   useEffect(() => {
@@ -178,74 +198,165 @@ export default function MeetingTranscriptApp() {
 
   const handleStartRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      let finalStream = micStream;
+      let allTracks = [...micStream.getTracks()];
 
-      audioChunksRef.current = []
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data)
-      }
+      if (typeof window !== "undefined" && window.electronAPI?.getDesktopSourceId) {
+        const { success, sourceId } = await window.electronAPI.getDesktopSourceId();
+        if (success && sourceId) {
+          try {
+            const systemStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: sourceId
+                }
+              },
+              video: {
+                mandatory: {
+                  chromeMediaSource: 'desktop',
+                  chromeMediaSourceId: sourceId
+                }
+              }
+            } as any);
 
-      mediaRecorderRef.current.onstop = async () => {
-        setIsProcessing(true); // Start processing state
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const arrayBuffer = await audioBlob.arrayBuffer();
+            allTracks = [...allTracks, ...systemStream.getTracks()];
 
-        try {
-          const { success, summary, action_items, transcript: backendTranscript, error } = await window.electronAPI.sendAudioForAnalysis(arrayBuffer);
-
-          if (success) {
-            // Convert backend's single string transcript to TranscriptEntry[]
-            setTranscript(backendTranscript ? [{ id: "1", speaker: "AI", text: backendTranscript, timestamp: formatTime(0), confidence: 1 }] : []);
-            setSummary(summary || null);
-
-            // Map backend's action_items to your new Task interface
-            const mappedTasks: Task[] = action_items?.map((item: any, index: number) => ({
-              id: String(index), // Generate a simple ID
-              title: item.task,
-              assignee: item.owner,
-              priority: "medium", // Default, as backend doesn't provide this
-              completed: false,
-              dueDate: item.deadline === "Not specified" ? undefined : item.deadline,
-            })) || [];
-            setTasks(mappedTasks);
-
-            toast.success("Analysis complete!", {
-              description: "Meeting summary and action items are ready."
-            });
-          } else {
-            console.error("Analysis failed:", error);
-            toast.error(`Analysis failed: ${error}`);
+            const audioContext = new AudioContext();
+            const dest = audioContext.createMediaStreamDestination();
+            
+            audioContext.createMediaStreamSource(micStream).connect(dest);
+            if (systemStream.getAudioTracks().length > 0) {
+               audioContext.createMediaStreamSource(systemStream).connect(dest);
+            }
+            
+            finalStream = dest.stream;
+          } catch (systemAudioError) {
+             console.warn("Could not capture system audio, falling back to mic only:", systemAudioError);
+             toast.error("Could not capture system audio. Falling back to microphone only.");
           }
-        } catch (ipcError: any) {
-          console.error("IPC call failed:", ipcError);
-          toast.error(`Error during analysis: ${ipcError.message}`);
-        } finally {
-          setIsProcessing(false); // End processing state
         }
       }
 
-      mediaRecorderRef.current.start()
-      setIsRecording(true)
-      setIsPaused(false) // Ensure not paused when starting
-      setMeetingDuration(0) // Reset duration on new recording
-      setTranscript([]) // Clear previous data
-      setSummary(null)
-      setTasks([])
+      let deepgramKey = "";
+      try {
+        const res = await fetch("http://localhost:8000/api/credentials");
+        const data = await res.json();
+        if (data.deepgram_api_key) deepgramKey = data.deepgram_api_key;
+      } catch (err) {
+        console.error("Failed to fetch Deepgram credentials:", err);
+        toast.error("Deepgram API Key not found on backend.");
+        return;
+      }
 
-      toast.info("Recording started!")
+      const socket = new WebSocket("wss://api.deepgram.com/v1/listen?punctuate=true&diarize=true", ["token", deepgramKey]);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+          mediaRecorderRef.current = new MediaRecorder(finalStream, { mimeType: 'audio/webm' })
+          ;(mediaRecorderRef.current as any).originalTracks = allTracks;
+
+          mediaRecorderRef.current.ondataavailable = (event) => {
+             if (event.data.size > 0 && socket.readyState === 1) {
+                 socket.send(event.data)
+             }
+          }
+
+          socket.onmessage = (message) => {
+             const received = JSON.parse(message.data)
+             if (received.channel && received.channel.alternatives && received.channel.alternatives[0]) {
+                 const transcriptFromDeepgram = received.channel.alternatives[0].transcript
+                 if (transcriptFromDeepgram && received.is_final) {
+                     const words = received.channel.alternatives[0].words;
+                     const speakerId = words && words.length > 0 ? words[0].speaker : 0;
+                     
+                     fullTranscriptRef.current += `\n[Speaker ${speakerId}]: ${transcriptFromDeepgram}`;
+                     
+                     setTranscript(prev => [
+                         ...prev, 
+                         { 
+                             id: String(Date.now()), 
+                             speaker: `Speaker ${speakerId}`, 
+                             text: transcriptFromDeepgram, 
+                             timestamp: "Live", // Live label to bypass stale closure on duration
+                             confidence: 1 
+                         }
+                     ]);
+                 }
+             }
+          };
+
+          socket.onerror = (error) => {
+             console.error("Deepgram WebSocket Error:", error);
+             toast.error("Error streaming to Deepgram.");
+          };
+
+          mediaRecorderRef.current.start(250) // slice every 250ms
+          setIsRecording(true)
+          setIsPaused(false) // Ensure not paused when starting
+          setMeetingDuration(0) // Reset duration on new recording
+          setTranscript([]) // Clear previous data
+          setSummary(null)
+          setTasks([])
+          fullTranscriptRef.current = ""
+          toast.info("Live Recording & Streaming started!")
+      };
     } catch (error) {
       console.error("Error starting recording:", error)
       toast.error(`Failed to start recording: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  const handleStopRecording = () => {
+  const handleStopRecording = async () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop()
+      if ((mediaRecorderRef.current as any).originalTracks) {
+        (mediaRecorderRef.current as any).originalTracks.forEach((track: MediaStreamTrack) => track.stop());
+      }
+
+      if (socketRef.current) {
+          if (socketRef.current.readyState === 1) {
+              socketRef.current.send(JSON.stringify({ type: "CloseStream" }))
+          }
+          socketRef.current.close();
+      }
+
       setIsRecording(false)
       setIsPaused(false) // Ensure not paused when stopping
-      toast.info("Recording stopped. Analyzing audio...")
+      toast.info("Recording stopped. Analyzing full transcript with Gemini...")
+
+      // Trigger Gemini Summarization
+      setIsProcessing(true);
+      try {
+         const res = await fetch("http://localhost:8000/analyze/text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: fullTranscriptRef.current })
+         });
+         const data = await res.json();
+         if (res.ok) {
+            setSummary(data.summary || null);
+            const mappedTasks: Task[] = data.action_items?.map((item: any, index: number) => ({
+              id: String(index),
+              title: item.task,
+              assignee: item.owner,
+              priority: "medium",
+              completed: false,
+              dueDate: item.deadline === "Not specified" ? undefined : item.deadline,
+            })) || [];
+            setTasks(mappedTasks);
+            toast.success("Analysis complete!", {
+              description: "Meeting summary and action items are ready."
+            });
+         } else {
+            toast.error(data.detail || "Failed to analyze");
+         }
+      } catch (err) {
+         toast.error("Gemini Error: " + String(err));
+      } finally {
+         setIsProcessing(false);
+      }
     }
   }
 
@@ -343,9 +454,43 @@ export default function MeetingTranscriptApp() {
     }
   };
 
+  const toggleWidgetMode = () => setIsWidgetMode(!isWidgetMode);
+
+  if (isWidgetMode) {
+    return (
+      <div 
+        className="flex items-center justify-between w-[350px] h-[80px] bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/20 dark:border-white/10 px-4 cursor-move" 
+        style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+      >
+        <div className="flex items-center space-x-3">
+          <Brain className="h-6 w-6 text-blue-600 animate-pulse-gentle" />
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">MinuteMaster</span>
+            <span className="text-xs text-muted-foreground font-mono">{formatTime(meetingDuration)} {isRecording && <span className="text-red-500 animate-pulse ml-1">●</span>}</span>
+          </div>
+        </div>
+        
+        <div className="flex items-center space-x-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+          {!isRecording ? (
+            <Button size="icon" variant="ghost" className="h-8 w-8 rounded-full bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400" onClick={handleStartRecording}>
+              <Mic className="h-4 w-4" />
+            </Button>
+          ) : (
+            <Button size="icon" variant="destructive" className="h-8 w-8 rounded-full animate-pulse" onClick={handleStopRecording}>
+              <Square className="h-4 w-4" />
+            </Button>
+          )}
+          <Button size="icon" variant="ghost" className="h-8 w-8 rounded-full" onClick={toggleWidgetMode} title="Expand Dashboard">
+            <ExternalLink className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen relative overflow-hidden">
+    <div className="flex flex-col min-h-screen relative overflow-hidden bg-slate-50 dark:bg-slate-950">
+      <Titlebar />
       {/* Animated Background */}
       <div className="fixed inset-0 -z-10">
         {/* Light mode background */}
@@ -389,6 +534,9 @@ export default function MeetingTranscriptApp() {
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 via-purple-600 to-blue-600 bg-clip-text text-transparent animate-gradient-x bg-[length:200%_auto]">
                   MeetingAI
                 </h1>
+                <Button variant="ghost" size="sm" onClick={toggleWidgetMode} className="ml-4 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700">
+                  Collapse to Widget
+                </Button>
               </div>
               {isRecording && (
                 <Badge

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron")
+const { app, BrowserWindow, ipcMain, desktopCapturer } = require("electron")
 const path = require("path")
 const isDev = require("electron-is-dev")
 const fs = require('fs');
@@ -9,11 +9,14 @@ let mainWindow
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-  width: 1400,
-  height: 900,
-  minWidth: 1200,
-  minHeight: 800,
+  width: 350,
+  height: 80,
+  minWidth: 350,
+  minHeight: 80,
   frame: false,
+  transparent: true,
+  alwaysOnTop: true,
+  resizable: true,
   webPreferences: {
     nodeIntegration: false,
     contextIsolation: true,
@@ -21,7 +24,6 @@ function createWindow() {
     preload: path.join(__dirname, "preload.js"),
   },
   show: false,
-  backgroundColor: "#f8fafc",
 })
 
     const startUrl = isDev ? "http://localhost:3000" : `file://${path.join(__dirname, "../out/index.html")}`
@@ -32,9 +34,9 @@ function createWindow() {
       mainWindow.show()
     })
 
-    if (isDev) {
+    /* if (isDev) {
       mainWindow.webContents.openDevTools()
-    }
+    } */
 
     mainWindow.on("closed", () => {
       mainWindow = null
@@ -51,12 +53,6 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit()
-  }
-})
-
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow()
@@ -66,6 +62,28 @@ app.on("activate", () => {
 ipcMain.on("minimize", () => mainWindow.minimize());
 ipcMain.on("maximize", () => mainWindow.maximize());
 ipcMain.on("close", () => app.quit());
+ipcMain.on("resize-window", (event, width, height) => {
+  if (mainWindow) {
+    mainWindow.setMinimumSize(350, 80);
+    mainWindow.setSize(width, height, true);
+  }
+});
+ipcMain.on("set-always-on-top", (event, isTop) => {
+  if (mainWindow) {
+    mainWindow.setAlwaysOnTop(isTop);
+  }
+});
+
+ipcMain.handle("get-desktop-source-id", async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const primarySource = sources.find(s => s.name === 'Entire screen' || s.name === 'Screen 1') || sources[0];
+    return { success: true, sourceId: primarySource ? primarySource.id : null };
+  } catch (error) {
+    console.error("Error getting desktop sources:", error);
+    return { success: false, error: error.message };
+  }
+});
 
 
 ipcMain.handle("start-transcript-capture", async () => {
@@ -100,7 +118,7 @@ ipcMain.handle("send-audio-for-analysis", async (event, arrayBuffer) => {
       contentType: 'audio/webm',
     });
 
-    const response = await fetch('https://meeting-ai-y7e0.onrender.com/analyze', {
+    const response = await fetch('http://127.0.0.1:8000/analyze/audio', {
       method: 'POST',
       body: form,
     });
@@ -128,7 +146,7 @@ ipcMain.handle("send-audio-for-analysis", async (event, arrayBuffer) => {
 ipcMain.handle("process-ai-summary", async (event, transcript) => {
   console.log("Main process received text transcript for AI summary.");
   try {
-    const response = await fetch("https://meeting-ai-y7e0.onrender.com/analyze", {
+    const response = await fetch("http://127.0.0.1:8000/analyze/text", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -246,14 +264,12 @@ ipcMain.handle("fetch-notion-databases", async (event, apiKey) => {
       auth: apiKey,
     })
 
-    // >>> FIX STARTS HERE <<<
     const response = await notion.search({
       filter: {
         value: "database",
         property: "object",
-      }, // This comma is crucial
-    }); // This closing brace and parenthesis are crucial
-    // >>> FIX ENDS HERE <<<
+      },
+    });
 
     const databases = response.results.map((db) => ({
       id: db.id,

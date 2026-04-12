@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   minimize: () => ipcRenderer.send("minimize"),
   maximize: () => ipcRenderer.send("maximize"),
   close: () => ipcRenderer.send("close"),
+  resizeWindow: (width, height) => ipcRenderer.send("resize-window", width, height),
+  setAlwaysOnTop: (isTop) => ipcRenderer.send("set-always-on-top", isTop),
+  getDesktopSourceId: () => ipcRenderer.invoke("get-desktop-source-id"),
 
   startTranscriptCapture: () => ipcRenderer.invoke("start-transcript-capture"),
   stopTranscriptCapture: () => ipcRenderer.invoke("stop-transcript-capture"),

@@ -4,7 +4,6 @@ import { Inter } from "next/font/google"
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "sonner"
-import Titlebar from "@/components/ui/titlebar"
 
 const inter = Inter({ subsets: ["latin"] })
 
@@ -25,7 +24,6 @@ export default function RootLayout({
         <div className="h-full">
           <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
 
-            <Titlebar />
       
             {children}
               
