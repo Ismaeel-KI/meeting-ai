@@ -199,6 +199,12 @@ export default function MeetingTranscriptApp() {
   const handleStartRecording = async () => {
     try {
       const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const micTrack = micStream.getAudioTracks()[0];
+      if (micTrack && micTrack.label) {
+        toast.info(`Using microphone: ${micTrack.label}`);
+      } else {
+        toast.warning("Microphone stream acquired, but no device label found.");
+      }
       let finalStream = micStream;
       let allTracks = [...micStream.getTracks()];
 
@@ -224,6 +230,7 @@ export default function MeetingTranscriptApp() {
             allTracks = [...allTracks, ...systemStream.getTracks()];
 
             const audioContext = new AudioContext();
+            await audioContext.resume();
             const dest = audioContext.createMediaStreamDestination();
             
             audioContext.createMediaStreamSource(micStream).connect(dest);
@@ -287,11 +294,6 @@ export default function MeetingTranscriptApp() {
              }
           };
 
-          socket.onerror = (error) => {
-             console.error("Deepgram WebSocket Error:", error);
-             toast.error("Error streaming to Deepgram.");
-          };
-
           mediaRecorderRef.current.start(250) // slice every 250ms
           setIsRecording(true)
           setIsPaused(false) // Ensure not paused when starting
@@ -301,6 +303,20 @@ export default function MeetingTranscriptApp() {
           setTasks([])
           fullTranscriptRef.current = ""
           toast.info("Live Recording & Streaming started!")
+      };
+
+      socket.onerror = (error) => {
+         console.error("Deepgram WebSocket Error:", error);
+         toast.error("Error connecting to Deepgram. Please check your API key.");
+         setIsRecording(false);
+      };
+      
+      socket.onclose = (event) => {
+         if (!event.wasClean) {
+             console.error("Deepgram WebSocket closed unexpectedly:", event);
+             toast.error("Deepgram connection closed unexpectedly.");
+             setIsRecording(false);
+         }
       };
     } catch (error) {
       console.error("Error starting recording:", error)
@@ -455,6 +471,8 @@ export default function MeetingTranscriptApp() {
   };
 
   const toggleWidgetMode = () => setIsWidgetMode(!isWidgetMode);
+
+  if (!mounted) return null;
 
   if (isWidgetMode) {
     return (
