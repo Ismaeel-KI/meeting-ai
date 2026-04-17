@@ -1,144 +1,79 @@
-# GenAI Agentic Bot: The "MinuteMaster"
+# MinuteMaster - Meeting AI Assistant
 
 ## Overview
 
-The **MinuteMaster Agent** is an automated system designed to ingest raw meeting transcripts, analyze them using a Large Language Model (LLM), and produce structured, actionable outputs. The core function is to transform unstructured conversation into a concise summary and a clear list of tasks, complete with owners and deadlines, which can then be seamlessly shared across various collaboration platforms.
+The **MinuteMaster** system is an AI-powered desktop application built to streamline meeting documentation. It leverages live transcription and cutting-edge LLMs to record, transcribe, summarize, and extract actionable items from your meetings in real-time.
 
-This agent operates by breaking down the problem into a sequence of specialized tasks: transcription, information extraction, summarization, and distribution.
+---
 
------
+## System Architecture
 
-## System Architecture & Workflow
-
-The architecture is designed as a modular pipeline, allowing for flexibility and scalability.
+The application is split into two primary components: an Electron-wrapped Next.js frontend and a stateless FastAPI Python backend.
 
 **High-Level Flow:**
+`Audio Capture (Frontend)` → `Direct Deepgram Streaming (Frontend)` → `Raw Transcript Text` → `Core Backend Agent (FastAPI)` → `LLM Analysis (Google Gemini)` → `Structured JSON Output (Summary & Action Items)`
 
-`System Audio` → `Electron Frontend (Audio Capture)` → `Real-time Audio Stream (WebSocket)` → `Core Backend Agent (FastAPI)` → `Real-time Transcription Service` → `Raw Transcript Chunks` → `LLM for Incremental Analysis` → `Structured JSON Output (Summary & Action Items)` → `Electron Frontend (Display)` → `Database (Persistence)`
+### 1. Frontend Desktop App (Electron & Next.js)
+The frontend is built with **Next.js**, **React**, **TailwindCSS**, and **Radix UI**, wrapped into a cross-platform desktop application using **Electron**.
+* Requests secure API credentials from the backend.
+* Handles system audio capture and real-time streaming directly to **Deepgram** for speech-to-text transcription.
+* Displays a modern, responsive UI to show real-time meeting transcripts.
+* Sends compiled transcripts to the backend for AI processing once the meeting concludes.
+* Prepares data for external integrations (such as exporting to Notion).
 
-**Components:**
+### 2. Core Backend Agent (FastAPI)
+The backend is a lightweight, stateless Python application utilizing the **FastAPI** framework.
+* **Credentials Endpoint (`/api/credentials`)**: Securely provides the Deepgram API key to the frontend so it isn't hardcoded in the client application.
+* **AI Analysis Endpoint (`/analyze/text`)**: Takes a complete, raw transcript string and prompts **Google Gemini Flash** to generate an executive summary and extract precise action items (task, owner, deadline).
+* *Note: The backend currently operates without a database (no persistent storage) and does not handle real-time streaming directly.*
 
-1.  **Electron Frontend:** The desktop application built with Electron, responsible for:
-    *   Capturing system audio.
-    *   **Buffering captured audio for replay and quality testing.**
-    *   Establishing a WebSocket connection to the backend to stream audio.
-    *   Displaying live transcripts, summaries, and action items.
-    *   Providing a user interface for managing meetings and viewing historical data.
-2.  **Core Backend Agent (Python/FastAPI):** This is the brains of the operation.
-    *   Receives real-time audio streams from the Electron app via WebSocket.
-    *   Forwards audio to a real-time transcription service.
-    *   Receives transcript chunks from the transcription service.
-    *   Orchestrates incremental calls to the LLM for analysis.
-    *   Parses the LLM's structured output.
-    *   Stores meeting data in the database.
-    *   Streams analysis results back to the Electron frontend.
-3.  **Real-time Transcription Service:** Utilizes a service like **AssemblyAI** or **Deepgram**. The key requirement is **speaker diarization**—accurately identifying *who* said *what* and when, in real-time.
-4.  **LLM (Google Gemini 2.0 Flash):** Performs incremental analysis of transcript chunks to generate summaries and extract action items.
-5.  **Database:** Persists meeting transcripts, summaries, and action items for historical viewing and management.
+---
 
------
+## Technologies Used
 
-## The Agentic LLM Workflow 🤖
+* **Frontend:** Next.js (React 18), Electron, Tailwind CSS, Radix UI, Framer Motion
+* **Backend:** Python, FastAPI, Uvicorn, Pydantic
+* **AI & Machine Learning:** Google Gemini (`gemini-flash-latest`) for analysis, Deepgram for real-time transcription
+* **Integrations:** Prepare for exporting to Notion (via `@notionhq/client`)
 
-The magic happens in how the agent prompts the LLM. Instead of a single, massive prompt, a more robust approach involves a chained or multi-step prompt strategy.
+---
 
-### Step 1: Pre-processing the Transcript
+## Agentic LLM Workflow 🤖
 
-The raw transcript is cleaned and formatted slightly to be more LLM-friendly.
+MinuteMaster leverages Google Gemini to distill unstructured conversation into focused insights.
 
-**Input Example:**
+**Analysis Process:**
+1. **Dynamic Prompting**: The backend automatically fetches the current date to give the LLM context.
+2. **One-Shot Extraction**: The backend securely passes the full transcript to Gemini using an expert prompt.
+3. **Structured Response**: The LLM outputs strict JSON containing an executive summary and a list of action items, specifying the required `task`, predicted `owner`, and relative `deadline`.
 
-```
-[00:01:15] [Speaker_A_Maria]: Okay team, let's sync on the Q3 launch. Where are we with the marketing assets?
-[00:01:22] [Speaker_B_John]: I'm on it. The final designs should be ready for review by this Friday. I'll need final approval from Sarah before they go to print.
-[00:01:35] [Speaker_C_Sarah]: Sounds good, John. I'll make sure to review them by end of day Friday. Let's have David take the lead on drafting the announcement blog post. He's the best writer we have.
-[00:01:49] [Speaker_D_David]: I can handle that. I'll have a first draft ready for the team to review by our next call on Tuesday.
-```
-
-### Step 2: The Core LLM Prompt
-
-The backend sends a detailed prompt to the LLM. The key is to ask for a structured JSON output, which is easy to parse.
-
-> **System Prompt Example:**
->
-> You are an expert AI assistant specializing in meeting analysis. Your task is to process a meeting transcript and extract critical information.
->
-> Analyze the provided transcript, which includes speaker labels. The meeting took place on **Friday, July 25, 2025**.
->
-> **Your instructions are:**
->
-> 1.  **Generate a brief, executive-level summary** of the meeting's key decisions, conclusions, and main discussion points. Ignore pleasantries and off-topic conversations.
-> 2.  **Extract all specific action items**. For each action item, you must identify:
->       * `task`: A clear and concise description of the task.
->       * `owner`: The name of the person assigned to the task. Infer this from the speaker labels and conversation context. If no one is assigned, state "Unassigned".
->       * `deadline`: The specific deadline for the task. Infer this from phrases like "by Friday", "end of day", "next week". Convert all relative dates to a specific `YYYY-MM-DD` format based on the meeting date. If no deadline is mentioned, state "Not specified".
->
-> **Provide your final output in a single JSON object with two keys: "summary" and "action\_items".** The "action\_items" key should contain an array of objects.
-
-### Step 3: Parsing the LLM's JSON Output
-
-The backend receives a clean JSON response from the LLM.
-
-**Expected JSON Output:**
-
+**Expected JSON Output from Backend:**
 ```json
 {
-  "summary": "The team synchronized on the Q3 launch status. Key responsibilities for marketing assets and the announcement blog post were assigned. Final design approval processes and draft review timelines were established.",
+  "summary": "The team synchronized on the Q3 launch status. Key responsibilities for marketing assets and the announcement blog post were assigned.",
   "action_items": [
     {
       "task": "Finalize marketing asset designs for review.",
       "owner": "John",
       "deadline": "2025-07-25"
-    },
-    {
-      "task": "Review and provide final approval for marketing designs.",
-      "owner": "Sarah",
-      "deadline": "2025-07-25"
-    },
-    {
-      "task": "Draft the announcement blog post.",
-      "owner": "David",
-      "deadline": "2025-07-29"
     }
-  ]
+  ],
+  "transcript": "[Full transcript text...]"
 }
 ```
 
-### Step 4: Formatting and Distribution
+---
 
-The backend now uses this structured data to create human-readable messages for different platforms.
+## Running Locally
 
------
+### Backend Setup
+1. Navigate to the `backend` directory.
+2. Create and activate a Python virtual environment.
+3. Install dependencies: `pip install -r requirements.txt`
+4. Set up an `.env` file with `GEMINI_API_KEY` and `DEEPGRAM_API_KEY`.
+5. Run the server: `uvicorn main:app --reload` (Runs on `http://127.0.0.1:8000`)
 
-## Proposed Tech Stack
-
-  * **Backend:** **Python** with **FastAPI** – Excellent for async operations (calling external APIs) and the standard for ML/AI applications.
-  * **LLM:** **Google Gemini 2.0 Flash** – Optimized for speed and cost-effectiveness in real-time applications.
-  * **Transcription:** **AssemblyAI** or **Deepgram** – Services providing highly accurate real-time speaker diarization, crucial for ownership detection.
-  * **Frontend (Desktop Application):** **Electron** – For building a cross-platform desktop application that can capture system audio and provide a rich user interface.
-  * **System Audio Capture:** Leveraging Node.js capabilities within Electron to interact with native audio APIs or external tools like `ffmpeg`.
-  * **Database:** A database (e.g., SQLite for prototyping) to persist meeting data (transcripts, summaries, action items).
-  * **Integrations:**
-      * **Email:** Standard SMTP libraries.
-
------
-
-## Example Output (Slack Message Format)
-
-Here is how the final output would look when posted to a Slack channel.
-
-**Meeting Summary: Q3 Launch Sync (2025-07-25)**
-
-The team synchronized on the Q3 launch status. Key responsibilities for marketing assets and the announcement blog post were assigned. Final design approval processes and draft review timelines were established.
-
-**Action Items ✅**
-
-  * Finalize marketing asset designs for review.
-      * **Owner**: **John**
-      * **Deadline**: **Friday, July 25, 2025**
-  * Review and provide final approval for marketing designs.
-      * **Owner**: **Sarah**
-      * **Deadline**: **Friday, July 25, 2025**
-  * Draft the announcement blog post.
-      * **Owner**: **David**
-      * **Deadline**: **Tuesday, July 29, 2025**
+### Frontend Setup
+1. Navigate to the `frontend` directory.
+2. Install dependencies: `npm install`
+3. Run the development environment (Next.js + Electron window): `npm run electron-dev`
